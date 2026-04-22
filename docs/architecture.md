@@ -16,6 +16,10 @@ synthetic DGP      Kalshi API/cache       CSV export
      +------------------+--------------------+
                         |
                         v
+                 diagnostics.py
+         dataset profile and slice audit
+                        |
+                        v
                   features.py
           leak-safe feature matrix
                         |
@@ -62,10 +66,30 @@ The Kalshi adapter is the real-data bridge. It:
 - adds Prosperity-style microstructure features:
   `feat_signal`, `feat_momentum`, `feat_dispersion`, and `feat_liquidity`
 
+The CLI exposes this as both `run --kalshi` and `extract-kalshi`. The
+extraction command writes a normalized CSV without fitting models, which is the
+preferred path for larger pulls because the same dataset can be profiled,
+reviewed, versioned, and reused across backtests.
+
 The current adapter uses one market snapshot per row. The next research upgrade
 is fixed-horizon candlesticks, for example prices 7 days, 3 days, and 1 day
 before settlement, so the backtest measures information available before the
 market was resolved.
+
+## `diagnostics.py` - Data Audit
+
+Large exchange pulls need to be audited before they are modeled. The
+diagnostics layer computes:
+
+- row counts, unique IDs, duplicate IDs, date ranges, and missingness
+- market-prior Brier, log-loss, ROC AUC, and average precision
+- category, price-bucket, spread-bucket, tenor-bucket, and liquidity-quartile
+  slices
+
+The profile command writes `dataset_summary.csv`, `missingness.csv`, and
+`slices.csv`. These files answer "do we have enough data, where is it
+concentrated, and how strong is the market baseline?" before a model is allowed
+to claim edge.
 
 ## `features.py` - Spine Plus Signals
 
@@ -115,7 +139,9 @@ and evaluates contiguous forward folds. Each fold:
 6. compounds bankroll with fractional Kelly, fees, and max-position caps
 
 Reported metrics include PnL, final bankroll, hit rate, Sharpe, Sortino, max
-drawdown, reliability bins, per-category PnL, and one row per simulated bet.
+drawdown, reliability bins, AUC, average precision, bet coverage, turnover,
+profit factor, average traded edge, per-category PnL, model slices, and one row
+per simulated bet.
 
 ## `pareto.py` - Model Selection
 
@@ -135,8 +161,13 @@ writes:
 
 - `summary.txt`
 - `leaderboard.csv`
+- `normalized_dataset.csv`
+- `dataset_summary.csv`
+- `missingness.csv`
+- `slices.csv`
 - `calibration_<model>.csv`
 - `pnl_by_category_<model>.csv`
+- `slices_<model>.csv`
 - `bets_<model>.csv`
 
 These artifacts are deliberately flat so they can feed a notebook, dashboard,

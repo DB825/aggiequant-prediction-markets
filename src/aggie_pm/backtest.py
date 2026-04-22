@@ -31,6 +31,8 @@ Reported metrics:
 - Max drawdown of the bankroll path.
 - Hit rate (fraction of bets that won).
 - Per-category PnL breakdown.
+- AUC, average precision, bet coverage, turnover, profit factor, and
+  forecast/trading slices by category, price, spread, liquidity, and tenor.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from .features import FeatureMatrix, build_features
 from .models import Model
@@ -90,6 +93,18 @@ def expected_calibration_error(p: np.ndarray, y: np.ndarray, n_bins: int = 10) -
         return float("nan")
     w = df["n"] / df["n"].sum()
     return float((w * (df["avg_pred"] - df["emp_rate"]).abs()).sum())
+
+
+def _roc_auc(p: np.ndarray, y: np.ndarray) -> float:
+    if len(np.unique(y)) < 2:
+        return float("nan")
+    return float(roc_auc_score(y, p))
+
+
+def _average_precision(p: np.ndarray, y: np.ndarray) -> float:
+    if len(np.unique(y)) < 2:
+        return float("nan")
+    return float(average_precision_score(y, p))
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +162,19 @@ def _bet_and_pnl(
     return ("none", 0.0, 0.0)
 
 
+def _edge_snapshot(p_model: float, market_prob: float, spread: float) -> tuple[float, float, str, float]:
+    """Return YES edge, NO edge, best side, and best executable edge."""
+    half = spread / 2.0
+    ask_yes = min(max(market_prob + half, 1e-6), 1 - 1e-6)
+    bid_yes = min(max(market_prob - half, 1e-6), 1 - 1e-6)
+    edge_yes = p_model - ask_yes
+    ask_no = 1 - bid_yes
+    edge_no = (1 - p_model) - ask_no
+    if edge_yes >= edge_no:
+        return float(edge_yes), float(edge_no), "YES", float(edge_yes)
+    return float(edge_yes), float(edge_no), "NO", float(edge_no)
+
+
 def _max_drawdown(bankroll_path: np.ndarray) -> float:
     peak = np.maximum.accumulate(bankroll_path)
     dd = (bankroll_path - peak) / peak
@@ -176,6 +204,80 @@ def _sortino(returns: np.ndarray, n_per_year: float = 252.0) -> float:
     return mu / sd * math.sqrt(n_per_year)
 
 
+def _profit_factor(pnl: pd.Series) -> float:
+    gains = float(pnl[pnl > 0].sum())
+    losses = float(-pnl[pnl < 0].sum())
+    if losses <= 1e-12:
+        return float("inf") if gains > 0 else float("nan")
+    return gains / losses
+
+
+def _slice_metrics(bets_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute forecast and trading diagnostics over useful data slices."""
+    if bets_df.empty:
+        return pd.DataFrame()
+
+    work = bets_df.copy()
+    frames: list[pd.DataFrame] = []
+
+    def add_slice(labels: pd.Series, name: str) -> None:
+        local = work.copy()
+        local["_slice_value"] = labels.astype("string").fillna("missing")
+        rows: list[dict[str, object]] = []
+        for value, g in local.groupby("_slice_value", dropna=False, sort=True):
+            traded = g[g["side"] != "none"]
+            rows.append(
+                {
+                    "slice": name,
+                    "value": str(value),
+                    "n_events": int(len(g)),
+                    "n_bets": int(len(traded)),
+                    "coverage": float(len(traded) / len(g)) if len(g) else float("nan"),
+                    "brier": brier_score(g["model_prob"].to_numpy(), g["resolved"].to_numpy()),
+                    "log_loss": log_loss(g["model_prob"].to_numpy(), g["resolved"].to_numpy()),
+                    "avg_model_prob": float(g["model_prob"].mean()),
+                    "avg_market_prob": float(g["market_prob"].mean()),
+                    "avg_best_edge": float(g["best_edge"].mean()),
+                    "avg_trade_edge": (
+                        float(traded["trade_edge"].mean()) if len(traded) else float("nan")
+                    ),
+                    "hit_rate": (
+                        float((traded["pnl"] > 0).mean()) if len(traded) else float("nan")
+                    ),
+                    "pnl": float(traded["pnl"].sum()) if len(traded) else 0.0,
+                    "turnover": float(traded["stake"].sum()) if len(traded) else 0.0,
+                    "profit_factor": _profit_factor(traded["pnl"]) if len(traded) else float("nan"),
+                }
+            )
+        frames.append(pd.DataFrame(rows))
+
+    add_slice(work["category"].astype("string"), "category")
+    add_slice(
+        pd.cut(work["market_prob"], bins=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0], include_lowest=True),
+        "market_prob_bucket",
+    )
+    add_slice(
+        pd.cut(work["spread"], bins=[0.0, 0.01, 0.03, 0.05, 0.10, np.inf], include_lowest=True),
+        "spread_bucket",
+    )
+    add_slice(
+        pd.cut(
+            work["time_to_resolution"],
+            bins=[-np.inf, 1, 3, 7, 14, 30, np.inf],
+            include_lowest=True,
+        ),
+        "time_to_resolution_bucket",
+    )
+    if "feat_liquidity" in work.columns and work["feat_liquidity"].nunique(dropna=True) > 1:
+        try:
+            add_slice(pd.qcut(work["feat_liquidity"], q=4, duplicates="drop"), "liquidity_quartile")
+        except ValueError:
+            pass
+    add_slice(work["side"].astype("string"), "trade_side")
+
+    return pd.concat(frames, ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # Result container
 # ---------------------------------------------------------------------------
@@ -187,15 +289,28 @@ class ModelResult:
     brier: float
     log_loss: float
     ece: float
+    roc_auc: float
+    average_precision: float
     n_bets: int
+    coverage: float
     hit_rate: float
     gross_pnl: float
     final_bankroll: float
     sharpe: float
     sortino: float
     max_drawdown: float
+    turnover: float
+    avg_stake: float
+    avg_trade_edge: float
+    median_trade_edge: float
+    profit_factor: float
+    avg_win: float
+    avg_loss: float
+    n_yes_bets: int
+    n_no_bets: int
     calibration: pd.DataFrame
     per_category_pnl: pd.DataFrame
+    slices: pd.DataFrame
     bets: pd.DataFrame
 
 
@@ -207,6 +322,7 @@ class BacktestResult:
 
     def summary_table(self) -> pd.DataFrame:
         rows = []
+        market = self.results.get("market_prior")
         for r in self.results.values():
             rows.append(
                 {
@@ -214,13 +330,31 @@ class BacktestResult:
                     "brier": r.brier,
                     "log_loss": r.log_loss,
                     "ece": r.ece,
+                    "roc_auc": r.roc_auc,
+                    "average_precision": r.average_precision,
+                    "brier_edge_vs_market": (
+                        market.brier - r.brier if market is not None else float("nan")
+                    ),
+                    "log_loss_edge_vs_market": (
+                        market.log_loss - r.log_loss if market is not None else float("nan")
+                    ),
                     "n_bets": r.n_bets,
+                    "coverage": r.coverage,
                     "hit_rate": r.hit_rate,
                     "gross_pnl": r.gross_pnl,
                     "final_bankroll": r.final_bankroll,
                     "sharpe": r.sharpe,
                     "sortino": r.sortino,
                     "max_drawdown": r.max_drawdown,
+                    "turnover": r.turnover,
+                    "avg_stake": r.avg_stake,
+                    "avg_trade_edge": r.avg_trade_edge,
+                    "median_trade_edge": r.median_trade_edge,
+                    "profit_factor": r.profit_factor,
+                    "avg_win": r.avg_win,
+                    "avg_loss": r.avg_loss,
+                    "n_yes_bets": r.n_yes_bets,
+                    "n_no_bets": r.n_no_bets,
                 }
             )
         return pd.DataFrame(rows).sort_values("log_loss", kind="mergesort").reset_index(drop=True)
@@ -292,6 +426,12 @@ def walk_forward_backtest(
             # PnL per event
             rows = bets_by_model.setdefault(m.name, [])
             for i in range(len(fm_test.y)):
+                test_row = test_df.iloc[i]
+                edge_yes, edge_no, best_side, best_edge = _edge_snapshot(
+                    p_model=float(p[i]),
+                    market_prob=float(fm_test.market_prob[i]),
+                    spread=float(fm_test.market_spread[i]),
+                )
                 side, stake, pnl = _bet_and_pnl(
                     p_model=float(p[i]),
                     market_prob=float(fm_test.market_prob[i]),
@@ -302,18 +442,31 @@ def walk_forward_backtest(
                     max_position=max_position,
                     fee_bps=fee_bps,
                 )
+                trade_edge = edge_yes if side == "YES" else edge_no if side == "NO" else 0.0
                 rows.append(
                     {
-                        "event_id": test_df.iloc[i]["event_id"],
+                        "event_id": test_row["event_id"],
                         "category": str(fm_test.category[i]),
-                        "open_ts": int(test_df.iloc[i]["open_ts"]),
+                        "open_ts": int(test_row["open_ts"]),
+                        "resolve_ts": int(test_row["resolve_ts"]),
+                        "time_to_resolution": int(test_row["resolve_ts"] - test_row["open_ts"]),
                         "market_prob": float(fm_test.market_prob[i]),
                         "model_prob": float(p[i]),
                         "spread": float(fm_test.market_spread[i]),
                         "resolved": int(fm_test.y[i]),
+                        "edge_yes": edge_yes,
+                        "edge_no": edge_no,
+                        "best_side": best_side,
+                        "best_edge": best_edge,
+                        "trade_edge": float(trade_edge),
                         "side": side,
                         "stake": float(stake),
                         "pnl": float(pnl),
+                        "feat_liquidity": (
+                            float(test_row["feat_liquidity"])
+                            if "feat_liquidity" in test_df.columns
+                            else float("nan")
+                        ),
                     }
                 )
 
@@ -325,8 +478,8 @@ def walk_forward_backtest(
         p_all = np.concatenate(plist)
         bets_df = pd.DataFrame(bets_by_model[name]).sort_values("open_ts", kind="mergesort").reset_index(drop=True)
         traded = bets_df[bets_df["side"] != "none"].reset_index(drop=True)
-        returns = traded["pnl"].to_numpy() if len(traded) else np.array([0.0])
-        bankroll = np.cumprod(1.0 + returns) if len(traded) else np.array([1.0])
+        returns = traded["pnl"].to_numpy() if len(traded) else np.array([], dtype=float)
+        bankroll = np.r_[1.0, np.cumprod(1.0 + returns)] if len(traded) else np.array([1.0])
 
         per_cat = (
             bets_df.groupby("category")
@@ -334,28 +487,50 @@ def walk_forward_backtest(
                 n_events=("event_id", "count"),
                 n_bets=("side", lambda s: int((s != "none").sum())),
                 pnl=("pnl", "sum"),
+                avg_market_prob=("market_prob", "mean"),
+                avg_model_prob=("model_prob", "mean"),
+                avg_best_edge=("best_edge", "mean"),
+                turnover=("stake", "sum"),
             )
             .reset_index()
             .sort_values("pnl", ascending=False, kind="mergesort")
             .reset_index(drop=True)
         )
+        per_cat["coverage"] = per_cat["n_bets"] / per_cat["n_events"].clip(lower=1)
 
         hit = float((traded["pnl"] > 0).mean()) if len(traded) else float("nan")
+        wins = traded.loc[traded["pnl"] > 0, "pnl"]
+        losses = traded.loc[traded["pnl"] < 0, "pnl"]
+        traded_edges = traded["trade_edge"] if len(traded) else pd.Series(dtype=float)
+        slices = _slice_metrics(bets_df)
 
         result.results[name] = ModelResult(
             name=name,
             brier=brier_score(p_all, y_all),
             log_loss=log_loss(p_all, y_all),
             ece=expected_calibration_error(p_all, y_all),
+            roc_auc=_roc_auc(p_all, y_all),
+            average_precision=_average_precision(p_all, y_all),
             n_bets=int(len(traded)),
+            coverage=float(len(traded) / len(bets_df)) if len(bets_df) else float("nan"),
             hit_rate=hit,
             gross_pnl=float(traded["pnl"].sum()) if len(traded) else 0.0,
             final_bankroll=float(bankroll[-1]) if len(bankroll) else 1.0,
             sharpe=_sharpe(returns),
             sortino=_sortino(returns),
             max_drawdown=_max_drawdown(bankroll) if len(bankroll) else 0.0,
+            turnover=float(traded["stake"].sum()) if len(traded) else 0.0,
+            avg_stake=float(traded["stake"].mean()) if len(traded) else float("nan"),
+            avg_trade_edge=float(traded_edges.mean()) if len(traded_edges) else float("nan"),
+            median_trade_edge=float(traded_edges.median()) if len(traded_edges) else float("nan"),
+            profit_factor=_profit_factor(traded["pnl"]) if len(traded) else float("nan"),
+            avg_win=float(wins.mean()) if len(wins) else float("nan"),
+            avg_loss=float(losses.mean()) if len(losses) else float("nan"),
+            n_yes_bets=int((traded["side"] == "YES").sum()) if len(traded) else 0,
+            n_no_bets=int((traded["side"] == "NO").sum()) if len(traded) else 0,
             calibration=calibration_bins(p_all, y_all),
             per_category_pnl=per_cat,
+            slices=slices,
             bets=bets_df,
         )
 

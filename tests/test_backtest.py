@@ -172,9 +172,27 @@ def test_walk_forward_runs_all_models(bt_result):
 
 def test_walk_forward_leaderboard_shape(bt_result):
     df = bt_result.summary_table()
-    for col in ("model", "brier", "log_loss", "n_bets", "sharpe", "max_drawdown"):
+    for col in (
+        "model",
+        "brier",
+        "log_loss",
+        "log_loss_edge_vs_market",
+        "roc_auc",
+        "coverage",
+        "profit_factor",
+        "n_bets",
+        "sharpe",
+        "max_drawdown",
+    ):
         assert col in df.columns
     assert len(df) == len(bt_result.results)
+
+
+def test_walk_forward_emits_bet_and_slice_diagnostics(bt_result):
+    r = bt_result.results["logistic"]
+    assert {"edge_yes", "edge_no", "best_edge", "trade_edge", "time_to_resolution"} <= set(r.bets.columns)
+    assert not r.slices.empty
+    assert {"category", "market_prob_bucket", "spread_bucket", "trade_side"} <= set(r.slices["slice"])
 
 
 def test_market_prior_places_no_bets(bt_result):

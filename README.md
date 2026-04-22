@@ -35,6 +35,10 @@ prediction-markets project pod.
 - **Trading-aware backtest.** Walk-forward folds, fractional Kelly sizing,
   spread and fee costs, Brier score, log loss, ECE, Sharpe, Sortino, max
   drawdown, bankroll path, and per-category PnL are reported together.
+- **Large-dataset workflow.** `extract-kalshi` can build a reusable normalized
+  CSV from many Kalshi pages, and `profile` audits category coverage,
+  price/spread/liquidity buckets, duplicate IDs, missingness, and market-prior
+  baseline metrics before any model is trained.
 - **Pareto model selection.** `pareto.py` identifies non-dominated models
   across calibration, log loss, Sharpe, drawdown, and bankroll instead of
   over-selling one leaderboard metric.
@@ -66,7 +70,15 @@ aggie-pm run --csv path/to/markets.csv --out reports/csv_run
 Fetch resolved Kalshi markets and run the same backtest:
 
 ```powershell
-aggie-pm run --kalshi --kalshi-source historical --kalshi-pages 5 --out reports/kalshi
+aggie-pm run --kalshi --kalshi-source historical --kalshi-pages 50 --out reports/kalshi
+```
+
+Build and profile a larger reusable Kalshi dataset first:
+
+```powershell
+aggie-pm extract-kalshi --kalshi-source historical --kalshi-pages 50 --kalshi-page-limit 1000 --out data/kalshi_resolved.csv
+aggie-pm profile --csv data/kalshi_resolved.csv --out reports/kalshi_profile
+aggie-pm run --csv data/kalshi_resolved.csv --out reports/kalshi_large
 ```
 
 Useful knobs:
@@ -80,13 +92,15 @@ Useful knobs:
 | `--kalshi-source` | `historical` | `historical` for archived settled markets, `live` for recent markets |
 | `--kalshi-series` | none | optional Kalshi `series_ticker` filter |
 | `--kalshi-event` | none | optional Kalshi `event_ticker` filter |
-| `--kalshi-pages` | 5 | max Kalshi pages to fetch |
+| `--kalshi-pages` | 50 | max Kalshi pages to fetch |
+| `--kalshi-page-limit` | 1000 | Kalshi page size |
 | `--folds` | 6 | walk-forward folds |
 | `--kelly` | 0.25 | Kelly fraction |
 | `--min-edge` | 0.02 | min model-vs-market edge required to place a bet |
 | `--max-position` | 0.05 | bankroll fraction cap per bet |
 | `--fee-bps` | 20 | round-trip fee in basis points |
 | `--out` | none | directory to write artifacts |
+| `--save-dataset` | none | write the normalized dataset used in a run to CSV |
 
 ## Dataset Contract
 
@@ -118,7 +132,16 @@ This gives the project a clean data-engineering split:
 
 1. **Bronze:** raw Kalshi JSON cached exactly as received.
 2. **Silver:** exchange-specific fields normalized to the core schema.
-3. **Gold:** leak-safe feature matrix, model predictions, bets, and report CSVs.
+3. **Gold:** leak-safe feature matrix, model predictions, bets, slice metrics,
+   and report CSVs.
+
+For large pulls, the profiling layer writes:
+
+- `dataset_summary.csv` - row counts, unique IDs, date range, spread/liquidity
+  summary, and market-prior Brier/log-loss/AUC.
+- `missingness.csv` - missing counts and rates by column.
+- `slices.csv` - market-prior metrics by category, price bucket, spread bucket,
+  time-to-resolution bucket, and liquidity quartile when available.
 
 ## Kalshi Integration
 
@@ -135,6 +158,8 @@ uses that split directly:
   maps YES/NO results to `1/0`, derives a midpoint price, computes spread,
   maps timestamps to walk-forward indices, and attaches microstructure
   features.
+- `aggie-pm extract-kalshi` runs that same normalization path without fitting
+  models, so a large pull can be cached, profiled, reviewed, and reused.
 
 See the official Kalshi docs for
 [public market data](https://docs.kalshi.com/getting_started/quick_start_market_data),
@@ -164,6 +189,12 @@ The backtest asks three questions in order:
 `pareto.py` then asks which models are non-dominated across those objectives.
 This is the right framing for a portfolio operator: the most calibrated model,
 the highest Sharpe model, and the lowest drawdown model may be different.
+
+The backtest also emits market-relative Brier/log-loss improvement, ROC AUC,
+average precision, bet coverage, turnover, average traded edge, profit factor,
+YES/NO bet counts, and slice-level diagnostics. Those extra columns matter
+most on large datasets, where a headline Sharpe can hide that all the signal
+came from one category, one spread regime, or one tenor bucket.
 
 ## Related Portfolio Work
 
@@ -205,6 +236,7 @@ This repo can act as the hub that ties several strands of your work together:
 |   |-- prediction_markets.py
 |   `-- aggie_pm/
 |       |-- data.py
+|       |-- diagnostics.py
 |       |-- features.py
 |       |-- kalshi.py
 |       |-- pareto.py

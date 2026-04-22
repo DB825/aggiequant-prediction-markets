@@ -18,10 +18,11 @@ trains a zoo of eight models
 (market prior, base rate, logistic regression, k-NN, gradient boosting,
 isotonic-calibrated wrapper, Bayesian shrinkage, stacked ensemble),
 and runs a walk-forward backtest with fractional Kelly sizing that
-reports Brier, log loss, ECE, Sharpe, Sortino, max drawdown, and
-per-category PnL. The package is MIT-licensed, has a pytest suite and CI
-on Python 3.11/3.12, and is the archive-citable deliverable for this
-semester.
+reports Brier, log loss, ECE, AUC, Sharpe, Sortino, max drawdown,
+market-relative improvement, bet coverage, turnover, profit factor,
+per-category PnL, and slice-level diagnostics. The package is MIT-licensed,
+has a pytest suite and CI on Python 3.11/3.12, and is the archive-citable
+deliverable for this semester.
 
 ## What shipped
 
@@ -64,7 +65,8 @@ semester.
    initial pytest suite + CI.
 7. Follow-up: added Kalshi historical/live resolved-market ingestion,
    Prosperity-style microstructure features, optional sentiment hooks,
-   and Pareto-front model selection.
+   Pareto-front model selection, bulk Kalshi extraction, dataset profiling,
+   and richer slice metrics for larger datasets.
 
 ## Current state of the artifact
 
@@ -127,9 +129,12 @@ semester.
    window.
 3. Pick one open question from the list above and write a one-page
    research plan for how you would answer it with this codebase.
-4. Run `aggie-pm run --kalshi --kalshi-source historical --out reports/kalshi`
-   and inspect the generated `leaderboard.csv` and per-category PnL.
-5. Run the full pipeline on that real data. If no model beats
+4. Run `aggie-pm extract-kalshi --kalshi-pages 50 --kalshi-page-limit 1000 --out data/kalshi_resolved.csv`
+   and inspect `reports/kalshi_profile` after profiling it with
+   `aggie-pm profile --csv data/kalshi_resolved.csv --out reports/kalshi_profile`.
+5. Run the full pipeline on that real data with
+   `aggie-pm run --csv data/kalshi_resolved.csv --out reports/kalshi_large`.
+   If no model beats
    `market_prior` on log-loss, stop and diagnose features before
    adding anything else.
 

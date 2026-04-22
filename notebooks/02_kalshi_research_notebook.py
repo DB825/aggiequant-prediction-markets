@@ -33,6 +33,7 @@ import pandas as pd
 
 from aggie_pm.backtest import default_model_factory, walk_forward_backtest
 from aggie_pm.data import generate_synthetic_markets
+from aggie_pm.diagnostics import format_dataset_profile, profile_market_dataset
 from aggie_pm.features import build_features
 from aggie_pm.kalshi import load_kalshi_resolved
 from aggie_pm.pareto import pareto_front, rank_by_domination_count
@@ -52,8 +53,8 @@ def load_dataset() -> tuple[pd.DataFrame, str]:
     try:
         df = load_kalshi_resolved(
             source="historical",
-            max_pages=3,
-            page_limit=200,
+            max_pages=50,
+            page_limit=1000,
             cache_dir=KALSHI_CACHE,
             refresh=False,
         )
@@ -89,6 +90,11 @@ audit = (
     .sort_values("n", ascending=False)
 )
 print(audit.round(4).to_string())
+
+profile = profile_market_dataset(df)
+print("\n" + format_dataset_profile(profile))
+print("\nTop dataset slices:")
+print(profile["slices"].sort_values("n_events", ascending=False).head(12).round(4).to_string(index=False))
 
 if "feat_liquidity" in df.columns:
     print("\nLiquidity quantiles:")

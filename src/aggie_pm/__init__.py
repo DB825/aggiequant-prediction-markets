@@ -5,8 +5,8 @@ and point to as an example of a full quant pipeline: synthetic data
 generation, feature engineering, a model zoo (logistic regression, KNN,
 gradient boosting, isotonic calibration, stacked ensemble, Bayesian
 shrinkage), a walk-forward backtest with fractional Kelly sizing, and a
-full performance report (Brier, log loss, calibration, Sharpe, Sortino,
-max drawdown, per-category PnL).
+full performance report (Brier, log loss, calibration, AUC, Sharpe, Sortino,
+max drawdown, market-relative edge, slice diagnostics, per-category PnL).
 
 The pure-stdlib teaching script lives next to this package at
 `src/prediction_markets.py` and is intentionally preserved. This package
@@ -29,6 +29,7 @@ from .models import (
     train_model_zoo,
 )
 from .backtest import BacktestResult, walk_forward_backtest
+from .diagnostics import format_dataset_profile, profile_market_dataset, save_dataset_profile
 from .kalshi import build_orderbook_features, kalshi_markets_to_dataframe, load_kalshi_resolved
 from .pareto import pareto_front, pareto_mask, rank_by_domination_count
 from .report import format_report, save_report
@@ -50,6 +51,9 @@ __all__ = [
     "train_model_zoo",
     "BacktestResult",
     "walk_forward_backtest",
+    "format_dataset_profile",
+    "profile_market_dataset",
+    "save_dataset_profile",
     "build_orderbook_features",
     "kalshi_markets_to_dataframe",
     "load_kalshi_resolved",
