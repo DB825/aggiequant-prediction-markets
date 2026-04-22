@@ -13,7 +13,9 @@ vector and *augment* it with signals a research team might credibly have:
 - Book width (``market_spread``) as a liquidity / disagreement proxy.
 - The engineered latent features (``feat_signal``, ``feat_momentum``,
   ``feat_dispersion``) that real research teams would derive from public
-  data (economic surprises, polling, Elo, implied vol, etc.).
+  data (economic surprises, polling, Elo, implied vol, etc.). Optional
+  columns such as ``feat_liquidity``, ``feat_sentiment``, and
+  ``feat_news_volume`` are included when present.
 - Interactions: market_logit × category and market_logit × time_to_resolve,
   which let the model learn "the bias is biggest in crypto near resolution,"
   etc., without forcing a separate model per category.
@@ -32,6 +34,9 @@ import numpy as np
 import pandas as pd
 
 from .data import CATEGORIES
+
+CATEGORY_FEATURES = CATEGORIES + ("other",)
+OPTIONAL_SIGNAL_COLUMNS = ("feat_liquidity", "feat_sentiment", "feat_news_volume")
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,8 @@ def build_features(
         )
         # Smooth toward 0.5 with a pseudo-count so tiny categories don't blow up.
         n_pseudo = 20
-        for c in CATEGORIES:
+        observed = {str(c) for c in df["category"].dropna().unique()}
+        for c in sorted(observed | set(CATEGORIES)):
             n = int((df["category"] == c).sum())
             raw = category_base_rates.get(c, 0.5)
             category_base_rates[c] = (raw * n + 0.5 * n_pseudo) / (n + n_pseudo)
@@ -99,10 +105,16 @@ def build_features(
     cat = df["category"].to_numpy()
     cat_rate = np.array([category_base_rates.get(c, 0.5) for c in cat])
 
-    # Category one-hot, deterministic column order from CATEGORIES tuple.
-    one_hot = np.zeros((len(df), len(CATEGORIES)), dtype=float)
-    for j, c in enumerate(CATEGORIES):
-        one_hot[:, j] = (cat == c).astype(float)
+    # Category one-hot, deterministic column order from CATEGORIES tuple
+    # plus an "other" bucket for real exchanges whose taxonomy does not
+    # line up perfectly with the synthetic teaching categories.
+    one_hot = np.zeros((len(df), len(CATEGORY_FEATURES)), dtype=float)
+    known = np.isin(cat, CATEGORIES)
+    for j, c in enumerate(CATEGORY_FEATURES):
+        if c == "other":
+            one_hot[:, j] = (~known).astype(float)
+        else:
+            one_hot[:, j] = (cat == c).astype(float)
 
     feat_signal = df["feat_signal"].to_numpy(dtype=float)
     feat_mom = df["feat_momentum"].to_numpy(dtype=float)
@@ -125,8 +137,12 @@ def build_features(
         "mkt_logit_x_spread": mkt_l_x_spread,
     }
 
-    X_cols = list(base_cols.values()) + [one_hot[:, j] for j in range(len(CATEGORIES))]
-    names = tuple(list(base_cols.keys()) + [f"cat_{c}" for c in CATEGORIES])
+    for col in OPTIONAL_SIGNAL_COLUMNS:
+        if col in df.columns:
+            base_cols[col] = df[col].to_numpy(dtype=float)
+
+    X_cols = list(base_cols.values()) + [one_hot[:, j] for j in range(len(CATEGORY_FEATURES))]
+    names = tuple(list(base_cols.keys()) + [f"cat_{c}" for c in CATEGORY_FEATURES])
     X = np.column_stack(X_cols)
 
     y = df["resolved"].to_numpy(dtype=int) if "resolved" in df.columns else np.zeros(len(df), dtype=int)

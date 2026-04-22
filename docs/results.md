@@ -53,7 +53,8 @@ noisier datasets; at 1500 events it is fine but not magic.
 1. Export resolved markets from a public source (Polymarket, Kalshi,
    Metaculus) into the CSV schema described in
    `aggie_pm.data.load_markets_csv`.
-2. Run `aggie-pm run --csv path.csv --out reports/`.
+2. Or pull Kalshi resolved markets directly with
+   `aggie-pm run --kalshi --kalshi-source historical --out reports/kalshi`.
 3. Compare every model's log-loss and ECE to `market_prior`. If
    nothing beats the market on log-loss you do not have alpha - stop
    and rebuild your features before touching the bet sizer.
@@ -63,6 +64,14 @@ noisier datasets; at 1500 events it is fine but not magic.
 5. Inspect `pnl_by_category_<model>.csv` to see where the edge lives.
    A model whose PnL is concentrated in one category usually means a
    single bias, not a general-purpose alpha.
+
+## Pareto read
+
+After a run, pass `leaderboard.csv` through `aggie_pm.pareto.pareto_front`
+when choosing what to investigate next. A model that is not first on
+log-loss can still be non-dominated if it has materially better Sharpe,
+drawdown, or final bankroll. That is the honest way to connect model
+selection to a portfolio objective instead of cherry-picking one metric.
 
 ## Honest caveats
 

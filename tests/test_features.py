@@ -35,6 +35,24 @@ def test_category_one_hot_sums_to_one(fm_small):
     np.testing.assert_allclose(sums, 1.0)
 
 
+def test_unknown_category_uses_other_bucket(small_df):
+    df = small_df.copy()
+    df.loc[df.index[0], "category"] = "custom-kalshi-category"
+    fm, rates = build_features(df)
+    other_ix = fm.feature_names.index("cat_other")
+    assert fm.X[0, other_ix] == 1.0
+    assert "custom-kalshi-category" in rates
+
+
+def test_optional_real_data_signals_are_included(small_df):
+    df = small_df.copy()
+    df["feat_liquidity"] = np.log1p(np.arange(len(df)))
+    df["feat_sentiment"] = np.linspace(-1, 1, len(df))
+    fm, _ = build_features(df)
+    assert "feat_liquidity" in fm.feature_names
+    assert "feat_sentiment" in fm.feature_names
+
+
 def test_base_rates_frozen_prevent_leakage():
     df = generate_synthetic_markets(n_events=600, seed=13)
     train = df.iloc[:400].copy()

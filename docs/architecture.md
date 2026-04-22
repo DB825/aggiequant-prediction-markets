@@ -1,155 +1,154 @@
 # Architecture
 
-This document walks through every module in `aggie_pm` and explains why
-it exists, what it promises to callers, and which paper or practitioner
-text backs the design. If you are reading the code for the first time,
-read this file alongside it.
+This project is organized as a reproducible research pipeline rather than a
+single modeling script. The core contract is: every dataset, synthetic or real,
+is normalized to the same market schema before feature engineering, modeling,
+backtesting, and reporting.
 
-## Pipeline overview
+## Pipeline Overview
 
+```text
+synthetic DGP      Kalshi API/cache       CSV export
+     |                  |                    |
+     v                  v                    v
+  data.py          kalshi.py            load_markets_csv
+     |                  |                    |
+     +------------------+--------------------+
+                        |
+                        v
+                  features.py
+          leak-safe feature matrix
+                        |
+                        v
+                   models.py
+       baselines, ML models, wrappers
+                        |
+                        v
+                  backtest.py
+      walk-forward scoring and Kelly PnL
+                        |
+                        v
+                  pareto.py
+       multi-objective model selection
+                        |
+                        v
+                  report.py
+       console report and CSV artifacts
 ```
-          ┌──────────────┐   ┌─────────────┐   ┌────────────────┐
- dataset  │    data.py   │──▶│ features.py │──▶│   models.py    │──▶ predictions
-          │ synthetic or │   │ leak-safe   │   │ zoo w/ wrappers│
-          │ real CSV     │   │ features    │   │ + ensembles    │
-          └──────────────┘   └─────────────┘   └────────────────┘
-                                                      │
-                                                      ▼
-                                               ┌────────────────┐
-                                               │  backtest.py   │
-                                               │ walk-forward + │
-                                               │ Kelly + PnL    │
-                                               └────────────────┘
-                                                      │
-                                                      ▼
-                                               ┌────────────────┐
-                                               │   report.py    │
-                                               │ leaderboard +  │
-                                               │ CSV artifacts  │
-                                               └────────────────┘
-```
 
-## `data.py` - the honest DGP
+## `data.py` - Synthetic Teaching DGP
 
-The point of the synthetic generator is to give the pipeline a dataset
-where *there is something to learn but it is not trivial*:
+The synthetic generator gives the test suite a controlled world where:
 
-- A ground-truth probability exists for every event and is a smooth
-  function of observable features.
-- The market price is a noisy, systematically biased observation of
-  that true probability. The biases match the literature on real
-  markets (favourite-longshot bias in sports; retail over-enthusiasm
-  in crypto; under-pricing of status-quo outcomes in macro/policy -
-  see Wolfers & Zitzewitz 2004).
-- Resolutions `y` are Bernoulli draws from the true probability, which
-  sets an irreducible floor on Brier score equal to `E[p(1-p)]`.
+- a true probability exists for every event
+- the market price is informative but biased and noisy
+- resolutions are Bernoulli draws from the true probability
+- known category biases can be recovered only out-of-sample
 
-Why build a synthetic DGP at all? Because without ground truth we can
-only score a model against the market; with it we can *also* audit
-whether the pipeline is recovering the real signal. That is the
-difference between "our model beats the market by 0.002 Brier, maybe"
-and "we can show exactly which biases our model picked up and by how
-much."
+This lets the project prove that the pipeline can learn real signal before it
+touches real exchange data, where ground truth is noisier and latent.
 
-## `features.py` - spine + signals
+## `kalshi.py` - Real Resolved Markets
 
-The market logit is by far the strongest single feature in a roughly
-efficient market (Manski 2006). Every feature vector starts from the
-market logit and augments it with things a research team could
-credibly assemble:
+The Kalshi adapter is the real-data bridge. It:
 
-- raw price and logit
-- category one-hot (to absorb per-category bias)
-- smoothed category base rate, **computed on the training fold only**
-  and passed into the test fold unchanged (Bailey et al. 2014)
-- time-to-resolution, normalised
-- book spread as a liquidity / disagreement proxy
-- three engineered latent features (`feat_signal`, `feat_momentum`,
-  `feat_dispersion`) that stand in for things like economic-surprise
-  indices, polling spreads, Elo differentials, implied vol
-- two interactions: `market_logit × time_to_resolve` and
-  `market_logit × spread`, so the model can learn "the bias is biggest
-  in crypto near resolution" without a separate model per category
+- reads public live/recent markets from `GET /markets`
+- reads archived settled markets from `GET /historical/markets`
+- caches raw JSON under `data/kalshi_cache/`
+- maps YES/NO results to `1/0`
+- derives midpoint probability and spread from YES bid/ask/last price
+- maps timestamps to integer `open_ts` and `resolve_ts`
+- canonicalizes exchange categories into the stable model families
+- adds Prosperity-style microstructure features:
+  `feat_signal`, `feat_momentum`, `feat_dispersion`, and `feat_liquidity`
 
-The `FeatureMatrix` dataclass carries everything the backtest needs:
-design matrix, outcomes, market price, spread, category, and column
-names.
+The current adapter uses one market snapshot per row. The next research upgrade
+is fixed-horizon candlesticks, for example prices 7 days, 3 days, and 1 day
+before settlement, so the backtest measures information available before the
+market was resolved.
 
-## `models.py` - the zoo
+## `features.py` - Spine Plus Signals
 
-Every model implements a minimal `Model` protocol: `fit(FeatureMatrix)
--> Model` and `predict(FeatureMatrix) -> np.ndarray[float]` returning
-probabilities in (0, 1). This lets the backtest treat them
-uniformly.
+The market logit is the feature spine because a roughly efficient market price
+already contains much of the public signal. The model augments it with:
 
-| model | why it's in the zoo |
+- raw market probability and logit
+- spread and normalized time-to-resolution
+- category one-hot with an `other` bucket for real exchange taxonomies
+- smoothed category base rate computed on the training fold only
+- engineered signals: `feat_signal`, `feat_momentum`, `feat_dispersion`
+- optional real-data columns: `feat_liquidity`, `feat_sentiment`,
+  `feat_news_volume`
+- interactions between market logit and time/spread
+
+The key anti-leakage rule: category base rates are fit on the training window
+and passed unchanged into the test window.
+
+## `models.py` - Model Zoo
+
+Every model implements `fit(FeatureMatrix)` and `predict(FeatureMatrix)`.
+
+| model | role |
 | --- | --- |
-| `MarketPriorModel` | the benchmark to beat; passes the market price through untouched |
-| `BaseRateModel` | per-category smoothed YES rate; Gneiting & Raftery (2007) reference forecast |
-| `LogisticModel` | L2 logistic regression on standardised features; maximally interpretable |
-| `KNNModel` | distance-weighted k-NN; catches local non-linearities the linear model misses |
-| `GradientBoostingModel` | `HistGradientBoostingClassifier` with isotonic post-hoc calibration on a held-out fold (Niculescu-Mizil & Caruana 2005) |
-| `IsotonicCalibratedModel` | wraps any base model and calibrates it with isotonic regression |
-| `BayesianShrinkageModel` | precision-weighted logit combination with the market (Clemen & Winkler 1999) |
-| `StackedEnsemble` | logistic meta-learner on out-of-fold member predictions (Wolpert 1992) |
+| `MarketPriorModel` | pass the market price through; the benchmark to beat |
+| `BaseRateModel` | smoothed category historical YES rate |
+| `LogisticModel` | interpretable L2 logistic regression |
+| `KNNModel` | local nonparametric baseline |
+| `GradientBoostingModel` | strong tabular ML baseline with isotonic calibration |
+| `IsotonicCalibratedModel` | calibration wrapper for any base model |
+| `BayesianShrinkageModel` | logit-scale shrinkage toward the market |
+| `StackedEnsemble` | logistic meta-learner over base model probabilities |
 
-All wrappers re-fit their base model on the full training window after
-freezing the calibrator / stacker, so prediction time uses every
-available training row.
+The lineup is intentionally diverse. The point is not to over-tune one model;
+it is to compare modeling assumptions under the same leak-safe backtest.
 
-## `backtest.py` - walk-forward + Kelly
+## `backtest.py` - Walk-Forward And Kelly
 
-Time order is the only honest way to evaluate a market model. We
-reserve the first `min_train_frac` of events as the initial training
-window and split the remainder into `n_folds` contiguous test windows.
-At each fold the pipeline fits a fresh model zoo on all data that
-closed before the fold opened, predicts on the fold, and records
-scores + simulated trades.
+The backtest sorts events by `open_ts`, reserves an initial training window,
+and evaluates contiguous forward folds. Each fold:
 
-### Bet sizing
+1. fits feature transforms and category rates on past data only
+2. trains fresh models
+3. predicts the test window
+4. scores Brier, log loss, and ECE
+5. simulates YES/NO bets only when model edge clears spread and `min_edge`
+6. compounds bankroll with fractional Kelly, fees, and max-position caps
 
-For a binary market priced at `q`:
+Reported metrics include PnL, final bankroll, hit rate, Sharpe, Sortino, max
+drawdown, reliability bins, per-category PnL, and one row per simulated bet.
 
-```
-YES: edge = p_model - q_ask,    kelly_yes = edge / (1 - q_ask)
-NO : edge = (1 - q_bid) - (1-p), kelly_no  = edge / (1 - q_no_ask)
-```
+## `pareto.py` - Model Selection
 
-We scale by `kelly_fraction` (default 0.25 - quarter Kelly, Thorp 2006)
-and cap each bet at `max_position` of bankroll. Bankroll compounds
-across events. Round-trip fees (`fee_bps`) are subtracted from payoff.
+A single leaderboard sort hides real tradeoffs. `pareto.py` marks models as
+non-dominated across objectives such as:
 
-### Reported metrics
+- log loss, Brier, and ECE to minimize
+- Sharpe, final bankroll, and max drawdown to maximize
 
-- Brier score, log loss, expected calibration error (ECE)
-- n_bets, hit rate, gross PnL, final bankroll
-- Sharpe and Sortino on per-event returns, annualised to 252 bets
-- Max drawdown of the bankroll path
-- Per-category PnL breakdown
-- Reliability-diagram bin data
+This also applies to risk settings. A Kelly fraction with slightly lower final
+bankroll but much shallower drawdown may be preferable to the raw best return.
 
-## `report.py` - human + machine outputs
+## `report.py` - Human And Machine Outputs
 
-The console report is a leaderboard sorted by log-loss plus a per-model
-detail block with the metrics above and a small ASCII reliability
-diagram. The `--out` flag also writes:
+The CLI prints a compact leaderboard plus per-model detail. With `--out`, it
+writes:
 
-- `summary.txt` - the human report
-- `leaderboard.csv` - all models, all metrics
-- `calibration_<model>.csv` - bins, n, avg pred, empirical rate
-- `pnl_by_category_<model>.csv` - PnL per category
-- `bets_<model>.csv` - one row per event with side, stake, PnL
+- `summary.txt`
+- `leaderboard.csv`
+- `calibration_<model>.csv`
+- `pnl_by_category_<model>.csv`
+- `bets_<model>.csv`
 
-Those CSVs are intentionally small and flat so they are trivial to
-drop into a dashboard or a Jupyter notebook.
+These artifacts are deliberately flat so they can feed a notebook, dashboard,
+or later data warehouse without reverse-engineering object state.
 
-## What this pipeline deliberately does not do
+## What This Deliberately Does Not Do Yet
 
-- It does not talk to a real exchange. Kalshi / Polymarket loaders
-  belong next to `load_markets_csv`, not next to the Kelly sizer.
-- It does not claim live tradability. Slippage, latency, position
-  limits, and book depth are out of scope; the "tradable edge" the
-  README claims is a simulation with conservative fees, not an
-  investable backtest.
-- It does not hyper-optimise any model. The point is to show a
-  *lineup* of techniques, not to beat any one of them into the ground.
+- It does not execute live trades.
+- It does not model queue position, partial fills, slippage, latency, or
+  exchange position limits.
+- It does not claim that synthetic alpha transfers to real markets.
+- It does not yet pull fixed-horizon candlestick snapshots before settlement.
+- It does not perform large hyperparameter sweeps or deflated-Sharpe
+  corrections, though the Pareto and reporting pieces make those natural next
+  additions.

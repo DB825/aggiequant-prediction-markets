@@ -29,6 +29,8 @@ from .models import (
     train_model_zoo,
 )
 from .backtest import BacktestResult, walk_forward_backtest
+from .kalshi import build_orderbook_features, kalshi_markets_to_dataframe, load_kalshi_resolved
+from .pareto import pareto_front, pareto_mask, rank_by_domination_count
 from .report import format_report, save_report
 
 __all__ = [
@@ -48,6 +50,12 @@ __all__ = [
     "train_model_zoo",
     "BacktestResult",
     "walk_forward_backtest",
+    "build_orderbook_features",
+    "kalshi_markets_to_dataframe",
+    "load_kalshi_resolved",
+    "pareto_front",
+    "pareto_mask",
+    "rank_by_domination_count",
     "format_report",
     "save_report",
 ]

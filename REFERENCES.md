@@ -76,5 +76,36 @@ practitioner text. This file collects them so members can go deeper.
 ## Prediction-market research and datasets
 
 - Kalshi API docs: <https://docs.kalshi.com/>
+- Kalshi public market-data quickstart:
+  <https://docs.kalshi.com/getting_started/quick_start_market_data>.
+- Kalshi historical-data guide:
+  <https://docs.kalshi.com/getting_started/historical_data>.
+- Kalshi `GET /historical/markets` reference:
+  <https://docs.kalshi.com/api-reference/historical/get-historical-markets>.
 - Polymarket API docs: <https://docs.polymarket.com/api-reference>
 - Metaculus API: <https://www.metaculus.com/notebooks/15141/officially-launching-the-metaculus-api/>
+
+## Market microstructure and order-flow features
+
+- Cartea, A., Jaimungal, S. & Penalva, J. (2015). *Algorithmic and
+  High-Frequency Trading.* Cambridge University Press. Order-flow
+  imbalance, spread, and liquidity as predictive microstructure signals.
+- Avellaneda, M. & Stoikov, S. (2008). *High-frequency trading in a
+  limit order book.* Quantitative Finance 8(3). Inventory-aware
+  market-making intuition behind conservative sizing.
+
+## Sentiment and text-derived signals
+
+- Tetlock, P. C. (2007). *Giving Content to Investor Sentiment: The Role
+  of Media in the Stock Market.* Journal of Finance 62(3).
+- Loughran, T. & McDonald, B. (2011). *When Is a Liability Not a
+  Liability? Textual Analysis, Dictionaries, and 10-Ks.* Journal of
+  Finance 66(1). Domain-specific sentiment dictionaries.
+- Antweiler, W. & Frank, M. Z. (2004). *Is All That Talk Just Noise? The
+  Information Content of Internet Stock Message Boards.* Journal of
+  Finance 59(3). Social text as noisy but measurable signal.
+
+## Multi-objective selection
+
+- Deb, K. (2001). *Multi-Objective Optimization Using Evolutionary
+  Algorithms.* Wiley. Non-dominated sorting and Pareto-front framing.

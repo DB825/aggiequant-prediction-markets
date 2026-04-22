@@ -13,14 +13,15 @@
 
 The pod shipped `aggiequant-prediction-markets`, a pip-installable
 Python package that generates a realistic synthetic prediction-market
-dataset, engineers leak-safe features, trains a zoo of eight models
+dataset, can ingest resolved Kalshi markets, engineers leak-safe features,
+trains a zoo of eight models
 (market prior, base rate, logistic regression, k-NN, gradient boosting,
 isotonic-calibrated wrapper, Bayesian shrinkage, stacked ensemble),
 and runs a walk-forward backtest with fractional Kelly sizing that
 reports Brier, log loss, ECE, Sharpe, Sortino, max drawdown, and
-per-category PnL. The package is MIT-licensed, has 51 passing tests
-and CI on Python 3.11/3.12, and is the archive-citable deliverable for
-this semester.
+per-category PnL. The package is MIT-licensed, has a pytest suite and CI
+on Python 3.11/3.12, and is the archive-citable deliverable for this
+semester.
 
 ## What shipped
 
@@ -59,13 +60,16 @@ this semester.
    shrinkage were the two wrappers that moved metrics the most.
 5. Week 5: wrote the walk-forward backtester and Kelly sizer. First
    version compounded wrong (used PnL on stake, not on bankroll); fixed.
-6. Week 6: wrote report, CSV dump, CLI, README, tests. Locked 51-test
-   suite + CI.
+6. Week 6: wrote report, CSV dump, CLI, README, tests. Locked the
+   initial pytest suite + CI.
+7. Follow-up: added Kalshi historical/live resolved-market ingestion,
+   Prosperity-style microstructure features, optional sentiment hooks,
+   and Pareto-front model selection.
 
 ## Current state of the artifact
 
 - Runs end-to-end with `aggie-pm run` after `pip install -e ".[dev]"`.
-- Tests: 51 passing on Python 3.11/3.12.
+- Tests: pytest suite on Python 3.11/3.12.
 - Documentation: `README.md`, `docs/architecture.md`,
   `docs/results.md`, `REFERENCES.md`.
 - CI: `.github/workflows/check.yml` runs pytest + a CLI smoke run.
@@ -95,8 +99,9 @@ this semester.
 
 - ASCII reliability diagram is decorative; replace with matplotlib for
   a real memo.
-- No real-data loader for Kalshi or Polymarket yet; CSV schema is
-  documented but untested against actual exports.
+- Kalshi support currently uses a single market snapshot per row. The
+  stronger research version should pull fixed-horizon candlesticks
+  before settlement.
 - Deflated Sharpe Ratio is not computed; the README warns about this.
 
 ## Open questions for next cohort
@@ -105,7 +110,7 @@ this semester.
    dataset (>10k events), or does the extra variance from the
    meta-learner still cost it?
 2. Does the per-category bias the DGP encodes survive replacement with
-   real Polymarket resolved-event data?
+   real Kalshi or Polymarket resolved-event data?
 3. What is the out-of-fold Deflated Sharpe of the leaderboard's top
    model after correcting for the number of models tested?
 4. Can a simple recurrent feature (momentum of recent same-category
@@ -122,18 +127,17 @@ this semester.
    window.
 3. Pick one open question from the list above and write a one-page
    research plan for how you would answer it with this codebase.
-4. Wire a real Polymarket resolved-event pull into `data.py` as
-   `load_polymarket_markets(start, end) -> pd.DataFrame` matching the
-   existing schema. Do not touch any other module.
+4. Run `aggie-pm run --kalshi --kalshi-source historical --out reports/kalshi`
+   and inspect the generated `leaderboard.csv` and per-category PnL.
 5. Run the full pipeline on that real data. If no model beats
    `market_prior` on log-loss, stop and diagnose features before
    adding anything else.
 
 ## What I would have done differently
 
-Would have built the real-data loader in week 2 instead of week 6;
-synthetic data is good for unit tests but not for motivating design
-choices.
+Would have built the real-data loader in week 2 instead of after the
+synthetic pipeline. Synthetic data is excellent for unit tests, but
+real exchange data should shape feature design earlier.
 
 ## Files, links, and pointers
 
