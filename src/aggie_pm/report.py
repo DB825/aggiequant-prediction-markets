@@ -1,0 +1,83 @@
+"""Pretty-print a BacktestResult and save artifacts to disk."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .backtest import BacktestResult, ModelResult
+
+
+def _reliability_sparkline(cal: pd.DataFrame, width: int = 20) -> str:
+    """Tiny ASCII reliability diagram.
+
+    Shows empirical_rate minus avg_pred per bin; '|' is perfect, '+' is over,
+    '-' is under. Empty bins render as '.'.
+    """
+    out = []
+    for _, row in cal.iterrows():
+        n = row["n"]
+        if n == 0:
+            out.append(".")
+            continue
+        gap = row["emp_rate"] - row["avg_pred"]
+        if abs(gap) < 0.02:
+            out.append("|")
+        elif gap > 0:
+            out.append("+" if gap < 0.1 else "#")
+        else:
+            out.append("-" if gap > -0.1 else "=")
+    return "".join(out).ljust(width)[:width]
+
+
+def _format_model_block(r: ModelResult) -> str:
+    lines = [
+        f"-- {r.name} " + "-" * max(60 - len(r.name), 3),
+        f"  brier    {r.brier:.4f}    log_loss {r.log_loss:.4f}    ECE {r.ece:.4f}",
+        f"  n_bets   {r.n_bets:>6d}    hit_rate {r.hit_rate:.3f}"
+        f"    gross_pnl {r.gross_pnl:+.4f}    bankroll {r.final_bankroll:.4f}",
+        f"  sharpe   {r.sharpe:>6.2f}    sortino  {r.sortino:>6.2f}"
+        f"    max_dd   {r.max_drawdown:+.3f}",
+        f"  calib    [{_reliability_sparkline(r.calibration)}]  (bins 0.0 -> 1.0; '|' calibrated, +/- off)",
+    ]
+    if not r.per_category_pnl.empty:
+        lines.append("  per-category PnL:")
+        for _, row in r.per_category_pnl.iterrows():
+            lines.append(
+                f"    {row['category']:<14s} n={int(row['n_events']):>4d}"
+                f"  bets={int(row['n_bets']):>4d}  pnl={row['pnl']:+.4f}"
+            )
+    return "\n".join(lines)
+
+
+def format_report(result: BacktestResult) -> str:
+    header = [
+        "=" * 72,
+        "  AggieQuant prediction-markets walk-forward backtest",
+        "=" * 72,
+        f"  folds: {result.n_folds}    test events: {result.n_events}",
+        "",
+        "Leaderboard (sorted by log-loss, lower is better):",
+        "",
+    ]
+    table = result.summary_table()
+    header.append(table.to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    header.append("")
+    header.append("Per-model detail:")
+    blocks = [_format_model_block(r) for r in result.results.values()]
+    return "\n".join(header + [""] + blocks)
+
+
+def save_report(result: BacktestResult, out_dir: str | Path) -> Path:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.txt").write_text(format_report(result), encoding="utf-8")
+    result.summary_table().to_csv(out / "leaderboard.csv", index=False)
+    for name, r in result.results.items():
+        safe = name.replace("(", "_").replace(")", "").replace(",", "_").replace(" ", "")
+        r.calibration.to_csv(out / f"calibration_{safe}.csv", index=False)
+        r.per_category_pnl.to_csv(out / f"pnl_by_category_{safe}.csv", index=False)
+        r.bets.to_csv(out / f"bets_{safe}.csv", index=False)
+    return out

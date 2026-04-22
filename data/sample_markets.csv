@@ -1,0 +1,11 @@
+event_id,category,question,market_prob,model_prob,resolved
+pm-001,macro,Will CPI print above consensus?,0.42,0.49,1
+pm-002,sports,Will the home team cover?,0.55,0.51,0
+pm-003,weather,Will rainfall exceed 1 inch?,0.28,0.33,0
+pm-004,earnings,Will revenue beat estimates?,0.63,0.67,1
+pm-005,policy,Will rates be held constant?,0.71,0.76,1
+pm-006,crypto,Will BTC close above the threshold?,0.47,0.39,0
+pm-007,macro,Will unemployment rise month over month?,0.36,0.44,1
+pm-008,sports,Will the favorite win outright?,0.68,0.62,1
+pm-009,weather,Will max temperature exceed forecast?,0.52,0.57,0
+pm-010,earnings,Will EPS beat estimates?,0.59,0.64,1
