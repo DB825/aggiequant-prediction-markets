@@ -226,18 +226,6 @@ engineering, optional real-data features, every model's fit/predict contract,
 scoring-rule properties, Kelly sizing, walk-forward correctness, Kalshi schema
 mapping, Pareto-front selection, and the CLI smoke path.
 
-## Is This A Good Personal Project?
-
-Yes. It has the ingredients that make a project credible beyond a class demo:
-
-- a real domain with noisy data and honest baselines
-- reproducible package structure, tests, docs, and CLI
-- real public-data integration through Kalshi
-- finance-aware evaluation rather than plain accuracy
-- room to connect market microstructure, data engineering, sentiment, and ML
-- a clear next step: show whether any real Kalshi features beat the market
-  out-of-sample after costs
-
 The strongest portfolio version is not "I built a prediction-market model."
 It is: "I built a reproducible research pipeline that tests whether public
 signals improve prediction-market probabilities after calibration, spread,
