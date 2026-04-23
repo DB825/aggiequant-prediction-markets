@@ -12,7 +12,11 @@ synthetic DGP      Kalshi API/cache       CSV export
      |                  |                    |
      v                  v                    v
   data.py          kalshi.py            load_markets_csv
-     |                  |                    |
+     |                  |
+     |                  v
+     |             case_study.py
+     |       fixed-horizon candle snapshots
+     |                  |
      +------------------+--------------------+
                         |
                         v
@@ -30,6 +34,10 @@ synthetic DGP      Kalshi API/cache       CSV export
                         v
                   backtest.py
       walk-forward scoring and Kelly PnL
+                        |
+                        v
+              relative_value.py
+     threshold-ladder repair and no-arb scan
                         |
                         v
                   pareto.py
@@ -71,10 +79,38 @@ extraction command writes a normalized CSV without fitting models, which is the
 preferred path for larger pulls because the same dataset can be profiled,
 reviewed, versioned, and reused across backtests.
 
-The current adapter uses one market snapshot per row. The next research upgrade
-is fixed-horizon candlesticks, for example prices 7 days, 3 days, and 1 day
-before settlement, so the backtest measures information available before the
-market was resolved.
+The base adapter uses one market snapshot per row. For resume-grade historical
+work, use `case-study`, which reconstructs fixed-horizon candlestick snapshots
+before settlement so the model only sees tradable point-in-time information.
+
+## `case_study.py` - Multi-Year Kalshi Snapshots
+
+The case-study builder turns recurring Kalshi series into a leak-safe research
+dataset:
+
+- fetches settled market rows for labels and metadata
+- fetches `GET /historical/markets/{ticker}/candlesticks`
+- creates 30/14/7/3/1-day snapshots from bid, ask, price, volume, and open
+  interest
+- stores `snapshot_ts` separately from `label_available_ts`
+- orders walk-forward folds by `label_available_ts` so labels only enter
+  training after settlement
+- writes the snapshot CSV, report artifacts, parameter sweep, and
+  `case_study.md`
+
+## `relative_value.py` - Threshold-Ladder Alpha
+
+The relative-value layer focuses on recurring ladder markets such as CPI and
+Fed thresholds. It:
+
+- parses numeric strikes from questions and tickers
+- enforces the monotonic constraint `P(X > low) >= P(X > high)` with isotonic
+  regression
+- quantifies adjacent ladder violations and repair gaps
+- tests the dominance package `YES(low) + NO(high)`, which has a minimum
+  payoff of 1.0 for nested threshold events
+- backtests only packages whose guaranteed edge survives bid/ask and fee
+  assumptions
 
 ## `diagnostics.py` - Data Audit
 
@@ -117,6 +153,8 @@ Every model implements `fit(FeatureMatrix)` and `predict(FeatureMatrix)`.
 | `MarketPriorModel` | pass the market price through; the benchmark to beat |
 | `BaseRateModel` | smoothed category historical YES rate |
 | `LogisticModel` | interpretable L2 logistic regression |
+| `MicrostructureResidualModel` | market-prior logit plus calibrated spread/liquidity/book residual |
+| `MicrostructureGBMModel` | nonlinear market-prior plus microstructure residual |
 | `KNNModel` | local nonparametric baseline |
 | `GradientBoostingModel` | strong tabular ML baseline with isotonic calibration |
 | `IsotonicCalibratedModel` | calibration wrapper for any base model |
@@ -139,9 +177,11 @@ and evaluates contiguous forward folds. Each fold:
 6. compounds bankroll with fractional Kelly, fees, and max-position caps
 
 Reported metrics include PnL, final bankroll, hit rate, Sharpe, Sortino, max
-drawdown, reliability bins, AUC, average precision, bet coverage, turnover,
-profit factor, average traded edge, per-category PnL, model slices, and one row
-per simulated bet.
+drawdown, reliability bins, AUC, average precision, tradable-event counts, bet
+coverage, turnover, profit factor, average traded edge, per-category PnL, model
+slices, and one row per simulated bet. Forecast scoring always uses all test
+events; optional tradability gates such as max spread or minimum liquidity only
+control whether a row is allowed to place a simulated trade.
 
 ## `pareto.py` - Model Selection
 
@@ -165,6 +205,7 @@ writes:
 - `dataset_summary.csv`
 - `missingness.csv`
 - `slices.csv`
+- `trading_sweep.csv` when the CLI runs with `--sweep`
 - `calibration_<model>.csv`
 - `pnl_by_category_<model>.csv`
 - `slices_<model>.csv`

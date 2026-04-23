@@ -38,7 +38,8 @@ def _format_model_block(r: ModelResult) -> str:
         f"-- {r.name} " + "-" * max(60 - len(r.name), 3),
         f"  brier    {r.brier:.4f}    log_loss {r.log_loss:.4f}    ECE {r.ece:.4f}"
         f"    AUC {r.roc_auc:.3f}",
-        f"  n_bets   {r.n_bets:>6d}    coverage {r.coverage:.3f}    hit_rate {r.hit_rate:.3f}"
+        f"  eligible {r.n_tradeable_events:>6d}    n_bets {r.n_bets:>6d}"
+        f"    coverage {r.coverage:.3f}    hit_rate {r.hit_rate:.3f}"
         f"    gross_pnl {r.gross_pnl:+.4f}    bankroll {r.final_bankroll:.4f}",
         f"  sharpe   {r.sharpe:>6.2f}    sortino  {r.sortino:>6.2f}"
         f"    max_dd   {r.max_drawdown:+.3f}",
@@ -79,6 +80,7 @@ def format_report(
         "log_loss_edge_vs_market",
         "ece",
         "roc_auc",
+        "n_tradeable_events",
         "n_bets",
         "coverage",
         "gross_pnl",
@@ -100,6 +102,7 @@ def save_report(
     *,
     dataset: pd.DataFrame | None = None,
     dataset_profile: dict[str, pd.DataFrame] | None = None,
+    trading_sweep: pd.DataFrame | None = None,
 ) -> Path:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -111,6 +114,8 @@ def save_report(
         dataset.to_csv(out / "normalized_dataset.csv", index=False)
     if dataset_profile is not None:
         save_dataset_profile(dataset_profile, out)
+    if trading_sweep is not None:
+        trading_sweep.to_csv(out / "trading_sweep.csv", index=False)
     for name, r in result.results.items():
         safe = name.replace("(", "_").replace(")", "").replace(",", "_").replace(" ", "")
         r.calibration.to_csv(out / f"calibration_{safe}.csv", index=False)

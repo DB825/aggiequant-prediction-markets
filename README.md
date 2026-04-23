@@ -29,9 +29,10 @@ prediction-markets project pod.
   fold only and frozen before scoring the test fold. Optional real-data
   signals such as `feat_liquidity`, `feat_sentiment`, and `feat_news_volume`
   are picked up automatically when present.
-- **Model zoo.** MarketPrior, BaseRate, Logistic, k-NN, gradient boosting,
-  isotonic calibration, Bayesian shrinkage toward the market, and stacked
-  ensembles all share the same `Model` protocol.
+- **Model zoo.** MarketPrior, BaseRate, Logistic, MicrostructureResidual,
+  MicrostructureGBM, k-NN, gradient boosting, isotonic calibration, Bayesian
+  shrinkage toward the market, and stacked ensembles all share the same
+  `Model` protocol.
 - **Trading-aware backtest.** Walk-forward folds, fractional Kelly sizing,
   spread and fee costs, Brier score, log loss, ECE, Sharpe, Sortino, max
   drawdown, bankroll path, and per-category PnL are reported together.
@@ -81,6 +82,29 @@ aggie-pm profile --csv data/kalshi_resolved.csv --out reports/kalshi_profile
 aggie-pm run --csv data/kalshi_resolved.csv --out reports/kalshi_large
 ```
 
+Build the leak-safe multi-year macro case study from recurring Kalshi CPI/Fed
+markets. This uses settled market rows only for labels, fetches historical
+candlesticks for point-in-time 30/14/7/3/1-day snapshots, runs walk-forward
+models, and rescoring sweeps for Kelly/edge/position/spread settings:
+
+```powershell
+aggie-pm case-study --series KXCPI,KXFED --out reports/kalshi_macro_case_study --out-data reports/kalshi_macro_snapshots.csv
+```
+
+The default candle fetcher is intentionally single-threaded to avoid Kalshi
+rate limits. Use `--workers 2` only after the cache has warmed.
+
+Scan the generated macro snapshots for threshold-ladder relative-value trades:
+
+```powershell
+aggie-pm ladder-study --csv reports/kalshi_macro_snapshots.csv --out reports/kalshi_ladder_study
+```
+
+This parses CPI/Fed thresholds, repairs each probability ladder with isotonic
+regression, and tests the dominance package `YES(lower threshold) + NO(higher
+threshold)`. That package should pay at least $1, so it is an arbitrage only
+when the all-in package cost clears $1 after spread and fees.
+
 Useful knobs:
 
 | flag | default | meaning |
@@ -99,8 +123,31 @@ Useful knobs:
 | `--min-edge` | 0.02 | min model-vs-market edge required to place a bet |
 | `--max-position` | 0.05 | bankroll fraction cap per bet |
 | `--fee-bps` | 20 | round-trip fee in basis points |
+| `--max-trade-spread` | none | optional gate that blocks trades in markets wider than this spread |
+| `--min-trade-liquidity` | none | optional gate on `feat_liquidity` before a bet can fire |
+| `--sweep` | false | rescore out-of-fold predictions across Kelly/edge/position settings |
 | `--out` | none | directory to write artifacts |
 | `--save-dataset` | none | write the normalized dataset used in a run to CSV |
+
+Case-study specific knobs:
+
+| flag | default | meaning |
+| --- | ---: | --- |
+| `--series` | `KXCPI,KXFED` | recurring Kalshi series tickers for the case study |
+| `--horizons-days` | `30,14,7,3,1` | fixed pre-close snapshot horizons |
+| `--period-interval` | `1440` | candle period in minutes: `1`, `60`, or `1440` |
+| `--cache-dir` | `data/kalshi_cache/case_study` | local cache for historical candles |
+| `--workers` | `1` | parallel candle fetch workers |
+| `--out-data` | `reports/kalshi_macro_snapshots.csv` | point-in-time snapshot CSV |
+
+Ladder-study knobs:
+
+| flag | default | meaning |
+| --- | ---: | --- |
+| `--csv` | `reports/kalshi_macro_snapshots.csv` | point-in-time snapshot CSV |
+| `--fee-bps` | `20` | fee estimate applied to dominance packages |
+| `--min-edge` | `0` | required after-fee guaranteed edge |
+| `--stake` | `0.01` | bankroll fraction per selected pair trade |
 
 ## Dataset Contract
 
@@ -190,11 +237,25 @@ The backtest asks three questions in order:
 This is the right framing for a portfolio operator: the most calibrated model,
 the highest Sharpe model, and the lowest drawdown model may be different.
 
+The most explicit microstructure thesis is the residual family:
+`MicrostructureResidualModel` and `MicrostructureGBMModel` use the market price
+as the prior, learn a correction from public book-quality signals, and tune how
+much to trust that correction on a walk-forward calibration slice. If
+microstructure does not improve the late training window, the model shrinks
+back toward the market prior.
+
 The backtest also emits market-relative Brier/log-loss improvement, ROC AUC,
 average precision, bet coverage, turnover, average traded edge, profit factor,
 YES/NO bet counts, and slice-level diagnostics. Those extra columns matter
 most on large datasets, where a headline Sharpe can hide that all the signal
 came from one category, one spread regime, or one tenor bucket.
+
+Trading rules are intentionally separated from forecast scoring. Optional
+tradability gates such as `--max-trade-spread` and `--min-trade-liquidity`
+can block a row from trading while still leaving it in Brier/log-loss/AUC
+evaluation. With `--sweep`, the CLI reuses the same out-of-fold predictions
+to produce `trading_sweep.csv` across Kelly fractions, edge thresholds,
+position caps, and spread gates without retraining the model zoo.
 
 ## Related Portfolio Work
 

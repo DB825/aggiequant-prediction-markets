@@ -73,6 +73,19 @@ def test_base_rates_frozen_prevent_leakage():
 def test_interaction_features_present(fm_small):
     assert "mkt_logit_x_ttr" in fm_small.feature_names
     assert "mkt_logit_x_spread" in fm_small.feature_names
+    assert "spread_x_extremity" in fm_small.feature_names
+
+
+def test_fundamental_market_features_present(fm_small):
+    for name in ("price_extremity", "price_uncertainty", "log_spread"):
+        assert name in fm_small.feature_names
+
+
+def test_optional_liquidity_interaction_present(small_df):
+    df = small_df.copy()
+    df["feat_liquidity"] = np.log1p(np.arange(len(df)))
+    fm, _ = build_features(df)
+    assert "liquidity_x_spread" in fm.feature_names
 
 
 def test_no_nans_or_infs(fm_small):

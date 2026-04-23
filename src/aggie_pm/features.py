@@ -11,11 +11,14 @@ vector and *augment* it with signals a research team might credibly have:
 - A rolling base-rate for the event's category over the training window.
 - Time-to-resolution (short-dated markets drift differently).
 - Book width (``market_spread``) as a liquidity / disagreement proxy.
+- Price extremity and binary-outcome uncertainty. Markets near 0.50 behave
+  differently from near-certain markets, even at the same raw edge.
 - The engineered latent features (``feat_signal``, ``feat_momentum``,
   ``feat_dispersion``) that real research teams would derive from public
   data (economic surprises, polling, Elo, implied vol, etc.). Optional
-  columns such as ``feat_liquidity``, ``feat_sentiment``, and
-  ``feat_news_volume`` are included when present.
+  columns such as ``feat_liquidity``, ``feat_trade_activity``,
+  ``feat_open_interest``, ``feat_event_market_count``, ``feat_sentiment``,
+  and ``feat_news_volume`` are included when present.
 - Interactions: market_logit × category and market_logit × time_to_resolve,
   which let the model learn "the bias is biggest in crypto near resolution,"
   etc., without forcing a separate model per category.
@@ -36,7 +39,15 @@ import pandas as pd
 from .data import CATEGORIES
 
 CATEGORY_FEATURES = CATEGORIES + ("other",)
-OPTIONAL_SIGNAL_COLUMNS = ("feat_liquidity", "feat_sentiment", "feat_news_volume")
+OPTIONAL_SIGNAL_COLUMNS = (
+    "feat_liquidity",
+    "feat_trade_activity",
+    "feat_open_interest",
+    "feat_volume_share",
+    "feat_event_market_count",
+    "feat_sentiment",
+    "feat_news_volume",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +80,11 @@ def _logit(p: np.ndarray | float, eps: float = 1e-6) -> np.ndarray:
     return np.log(p / (1 - p))
 
 
+def _finite(values: np.ndarray | pd.Series, *, fill: float = 0.0) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    return np.nan_to_num(arr, nan=fill, posinf=fill, neginf=fill)
+
+
 def build_features(
     df: pd.DataFrame,
     *,
@@ -96,11 +112,14 @@ def build_features(
             raw = category_base_rates.get(c, 0.5)
             category_base_rates[c] = (raw * n + 0.5 * n_pseudo) / (n + n_pseudo)
 
-    mkt_p = df["market_prob"].to_numpy(dtype=float)
+    mkt_p = _finite(df["market_prob"])
     mkt_l = _logit(mkt_p)
-    spread = df["market_spread"].to_numpy(dtype=float)
-    ttr = (df["resolve_ts"] - df["open_ts"]).to_numpy(dtype=float)
+    spread = _finite(df["market_spread"])
+    ttr = _finite(df["resolve_ts"] - df["open_ts"])
     ttr_n = ttr / max(ttr.max(), 1.0)
+    price_extremity = np.abs(mkt_p - 0.5)
+    price_uncertainty = 4.0 * mkt_p * (1.0 - mkt_p)
+    log_spread = np.log1p(np.maximum(spread, 0.0))
 
     cat = df["category"].to_numpy()
     cat_rate = np.array([category_base_rates.get(c, 0.5) for c in cat])
@@ -116,30 +135,38 @@ def build_features(
         else:
             one_hot[:, j] = (cat == c).astype(float)
 
-    feat_signal = df["feat_signal"].to_numpy(dtype=float)
-    feat_mom = df["feat_momentum"].to_numpy(dtype=float)
-    feat_disp = df["feat_dispersion"].to_numpy(dtype=float)
+    feat_signal = _finite(df["feat_signal"])
+    feat_mom = _finite(df["feat_momentum"])
+    feat_disp = _finite(df["feat_dispersion"])
 
     # Interactions
     mkt_l_x_ttr = mkt_l * ttr_n
     mkt_l_x_spread = mkt_l * spread
+    spread_x_extremity = spread * price_extremity
 
     base_cols = {
         "market_prob": mkt_p,
         "market_logit": mkt_l,
         "market_spread": spread,
+        "log_spread": log_spread,
         "ttr_norm": ttr_n,
+        "price_extremity": price_extremity,
+        "price_uncertainty": price_uncertainty,
         "category_base_rate": cat_rate,
         "feat_signal": feat_signal,
         "feat_momentum": feat_mom,
         "feat_dispersion": feat_disp,
         "mkt_logit_x_ttr": mkt_l_x_ttr,
         "mkt_logit_x_spread": mkt_l_x_spread,
+        "spread_x_extremity": spread_x_extremity,
     }
 
     for col in OPTIONAL_SIGNAL_COLUMNS:
         if col in df.columns:
-            base_cols[col] = df[col].to_numpy(dtype=float)
+            base_cols[col] = _finite(df[col])
+
+    if "feat_liquidity" in base_cols:
+        base_cols["liquidity_x_spread"] = base_cols["feat_liquidity"] * spread
 
     X_cols = list(base_cols.values()) + [one_hot[:, j] for j in range(len(CATEGORY_FEATURES))]
     names = tuple(list(base_cols.keys()) + [f"cat_{c}" for c in CATEGORY_FEATURES])

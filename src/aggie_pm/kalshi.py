@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -213,6 +213,26 @@ class KalshiClient:
                 break
         return out
 
+    def fetch_historical_market_candlesticks(
+        self,
+        ticker: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int = 1440,
+    ) -> list[dict[str, Any]]:
+        """Fetch historical candlesticks for one archived market ticker."""
+        safe_ticker = quote(ticker, safe="")
+        payload = self.get(
+            f"/historical/markets/{safe_ticker}/candlesticks",
+            params={
+                "start_ts": int(start_ts),
+                "end_ts": int(end_ts),
+                "period_interval": int(period_interval),
+            },
+        )
+        return payload.get("candlesticks") or []
+
 
 # ---------------------------------------------------------------------------
 # Fixed-point parsing
@@ -382,6 +402,12 @@ def kalshi_markets_to_dataframe(
     # Drop rows with unusable prices, but keep track of how many.
     df = df.dropna(subset=["market_prob"]).reset_index(drop=True)
 
+    if "event_ticker" in df.columns:
+        event_key = df["event_ticker"].replace("", np.nan).fillna(df["event_id"])
+        df["event_market_count"] = event_key.map(event_key.value_counts()).astype(int)
+    else:
+        df["event_market_count"] = 1
+
     # Day indices ordered by close_time. Walk-forward backtests need a
     # strict temporal order; if close_time is missing we fall back to the
     # row order, which is already API-returned "most recent first" and
@@ -445,6 +471,13 @@ def build_orderbook_features(df: pd.DataFrame) -> pd.DataFrame:
     spread = df["market_spread"].to_numpy(dtype=float)
     half_spread = np.maximum(spread / 2.0, 1e-3)
     volume = df["raw_volume"].to_numpy(dtype=float)
+    volume_24h = df["raw_volume_24h"].to_numpy(dtype=float)
+    open_interest = df["raw_open_interest"].to_numpy(dtype=float)
+    event_count = (
+        df["event_market_count"].to_numpy(dtype=float)
+        if "event_market_count" in df.columns
+        else np.ones(len(df), dtype=float)
+    )
 
     # Informed-flow proxy. nanmean if last is missing.
     last_filled = np.where(np.isfinite(last), last, mid)
@@ -456,13 +489,27 @@ def build_orderbook_features(df: pd.DataFrame) -> pd.DataFrame:
     extremity = np.abs(mid - 0.5) + 0.05
     feat_dispersion = spread / extremity
 
-    feat_liquidity = np.log1p(np.maximum(volume, 0.0))
+    total_liquidity = np.maximum(volume, 0.0) + np.maximum(volume_24h, 0.0) + np.maximum(open_interest, 0.0)
+    feat_liquidity = np.log1p(total_liquidity)
+    feat_trade_activity = np.log1p(np.maximum(volume_24h, 0.0))
+    feat_open_interest = np.log1p(np.maximum(open_interest, 0.0))
+    feat_volume_share = np.divide(
+        np.maximum(volume_24h, 0.0),
+        np.maximum(volume, 0.0) + 1.0,
+        out=np.zeros_like(volume_24h, dtype=float),
+        where=np.isfinite(volume_24h),
+    )
+    feat_event_market_count = np.log1p(np.maximum(event_count, 1.0))
 
     out = df.copy()
     out["feat_signal"] = np.clip(feat_signal, -6.0, 6.0)
     out["feat_momentum"] = np.clip(feat_momentum, -6.0, 6.0)
     out["feat_dispersion"] = np.clip(feat_dispersion, 0.0, 10.0)
     out["feat_liquidity"] = feat_liquidity
+    out["feat_trade_activity"] = feat_trade_activity
+    out["feat_open_interest"] = feat_open_interest
+    out["feat_volume_share"] = np.clip(feat_volume_share, 0.0, 10.0)
+    out["feat_event_market_count"] = feat_event_market_count
     return out
 
 

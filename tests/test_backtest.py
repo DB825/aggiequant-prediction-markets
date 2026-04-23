@@ -15,6 +15,7 @@ from aggie_pm.backtest import (
     default_model_factory,
     expected_calibration_error,
     log_loss,
+    sweep_trading_rules,
     walk_forward_backtest,
 )
 from aggie_pm.data import generate_synthetic_markets
@@ -190,15 +191,89 @@ def test_walk_forward_leaderboard_shape(bt_result):
 
 def test_walk_forward_emits_bet_and_slice_diagnostics(bt_result):
     r = bt_result.results["logistic"]
-    assert {"edge_yes", "edge_no", "best_edge", "trade_edge", "time_to_resolution"} <= set(r.bets.columns)
+    assert {
+        "edge_yes",
+        "edge_no",
+        "best_edge",
+        "trade_edge",
+        "time_to_resolution",
+        "trade_allowed",
+        "trade_block_reason",
+    } <= set(r.bets.columns)
     assert not r.slices.empty
-    assert {"category", "market_prob_bucket", "spread_bucket", "trade_side"} <= set(r.slices["slice"])
+    assert {"category", "market_prob_bucket", "spread_bucket", "trade_block_reason", "trade_side"} <= set(r.slices["slice"])
 
 
 def test_market_prior_places_no_bets(bt_result):
     r = bt_result.results["market_prior"]
     assert r.n_bets == 0
     assert r.gross_pnl == pytest.approx(0.0)
+
+
+def test_trade_spread_gate_blocks_all_wide_markets():
+    df = generate_synthetic_markets(n_events=300, seed=56)
+    df["market_spread"] = 0.50
+    result = walk_forward_backtest(
+        df,
+        default_model_factory,
+        n_folds=2,
+        min_train_frac=0.4,
+        max_trade_spread=0.10,
+    )
+    r = result.results["logistic"]
+    assert r.n_tradeable_events == 0
+    assert r.n_bets == 0
+    assert set(r.bets["trade_block_reason"]) == {"spread"}
+
+
+def test_walk_forward_orders_by_label_availability_when_present():
+    seen_first_train_labels: list[str] = []
+    df = pd.DataFrame(
+        {
+            "event_id": ["late_label", "early_label", "middle_label"],
+            "category": ["macro", "macro", "macro"],
+            "question": ["a", "b", "c"],
+            "market_prob": [0.4, 0.6, 0.5],
+            "market_spread": [0.02, 0.02, 0.02],
+            "open_ts": [1, 2, 3],
+            "resolve_ts": [100, 20, 60],
+            "label_available_ts": [100, 20, 60],
+            "resolved": [0, 1, 0],
+            "feat_signal": [0.0, 0.0, 0.0],
+            "feat_momentum": [0.0, 0.0, 0.0],
+            "feat_dispersion": [0.0, 0.0, 0.0],
+        }
+    )
+
+    class EchoMarket:
+        name = "echo_market"
+
+        def fit(self, fm):
+            return self
+
+        def predict(self, fm):
+            return fm.market_prob
+
+    def factory(fm):
+        # If open_ts were used, the first training label would be 0.
+        seen_first_train_labels.append(str(int(fm.y[0])))
+        return [EchoMarket().fit(fm)]
+
+    walk_forward_backtest(df, factory, n_folds=1, min_train_frac=1 / 3)
+
+    assert seen_first_train_labels == ["1"]
+
+
+def test_sweep_trading_rules_reuses_predictions(bt_result):
+    sweep = sweep_trading_rules(
+        bt_result,
+        kelly_fractions=(0.05,),
+        min_edges=(0.02, 0.05),
+        max_positions=(0.01,),
+        max_trade_spreads=(None, 0.05),
+    )
+    assert not sweep.empty
+    assert {"model", "kelly_fraction", "min_edge", "max_trade_spread", "n_bets", "sharpe"} <= set(sweep.columns)
 
 
 def test_logistic_is_competitive_with_market_log_loss(bt_result):

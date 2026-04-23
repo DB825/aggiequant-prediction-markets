@@ -6,6 +6,7 @@ import numpy as np
 
 from aggie_pm.features import build_features
 from aggie_pm.kalshi import (
+    KalshiClient,
     build_orderbook_features,
     canonicalize_category,
     kalshi_markets_to_dataframe,
@@ -75,10 +76,43 @@ def test_kalshi_markets_to_dataframe_maps_schema_and_prices():
 
 def test_orderbook_features_feed_feature_builder():
     df = build_orderbook_features(kalshi_markets_to_dataframe(RAW_MARKETS))
-    for col in ("feat_signal", "feat_momentum", "feat_dispersion", "feat_liquidity"):
+    for col in (
+        "feat_signal",
+        "feat_momentum",
+        "feat_dispersion",
+        "feat_liquidity",
+        "feat_trade_activity",
+        "feat_open_interest",
+        "feat_volume_share",
+        "feat_event_market_count",
+    ):
         assert col in df.columns
         assert np.isfinite(df[col]).all()
 
     fm, _ = build_features(df)
     assert "feat_liquidity" in fm.feature_names
+    assert "feat_open_interest" in fm.feature_names
     assert np.isfinite(fm.X).all()
+
+
+def test_candlestick_fetch_url_encodes_ticker_path(monkeypatch):
+    seen = {}
+
+    def fake_get(self, path, params=None):
+        seen["path"] = path
+        seen["params"] = params
+        return {"candlesticks": []}
+
+    monkeypatch.setattr(KalshiClient, "get", fake_get)
+
+    client = KalshiClient()
+    candles = client.fetch_historical_market_candlesticks(
+        "GDP-232022 Q4-T3.5",
+        start_ts=1,
+        end_ts=2,
+        period_interval=1440,
+    )
+
+    assert candles == []
+    assert seen["path"] == "/historical/markets/GDP-232022%20Q4-T3.5/candlesticks"
+    assert seen["params"]["period_interval"] == 1440

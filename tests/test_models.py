@@ -15,6 +15,8 @@ from aggie_pm.models import (
     KNNModel,
     LogisticModel,
     MarketPriorModel,
+    MicrostructureGBMModel,
+    MicrostructureResidualModel,
     StackedEnsemble,
     train_model_zoo,
 )
@@ -34,6 +36,8 @@ def split():
         lambda: MarketPriorModel(),
         lambda: BaseRateModel(),
         lambda: LogisticModel(),
+        lambda: MicrostructureResidualModel(),
+        lambda: MicrostructureGBMModel(),
         lambda: KNNModel(),
         lambda: GradientBoostingModel(),
         lambda: IsotonicCalibratedModel(base=LogisticModel()),
@@ -46,6 +50,8 @@ def split():
         "market_prior",
         "base_rate",
         "logistic",
+        "micro_residual",
+        "micro_gbm",
         "knn",
         "gbm",
         "iso_logistic",
@@ -100,9 +106,27 @@ def test_shrinkage_lies_between_base_and_market(split):
     assert (l_shr <= hi + 1e-6).all()
 
 
+def test_microstructure_residual_learns_market_blend(split):
+    fm_train, fm_test = split
+    model = MicrostructureResidualModel().fit(fm_train)
+    p = model.predict(fm_test)
+    assert 0.0 <= model._alpha <= 1.0
+    assert p.shape == fm_test.y.shape
+    assert (p > 0).all() and (p < 1).all()
+
+
+def test_microstructure_gbm_learns_market_blend(split):
+    fm_train, fm_test = split
+    model = MicrostructureGBMModel(max_iter=25).fit(fm_train)
+    p = model.predict(fm_test)
+    assert 0.0 <= model._alpha <= 1.0
+    assert p.shape == fm_test.y.shape
+    assert (p > 0).all() and (p < 1).all()
+
+
 def test_train_model_zoo_returns_all_models(split):
     fm_train, _ = split
     zoo = train_model_zoo(fm_train)
     names = {m.name for m in zoo}
-    for expected in ("market_prior", "base_rate", "logistic", "knn", "gbm"):
+    for expected in ("market_prior", "base_rate", "logistic", "micro_residual", "micro_gbm", "knn", "gbm"):
         assert expected in names

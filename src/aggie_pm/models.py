@@ -12,6 +12,13 @@ techniques, not one hyper-tuned black box:
   forecast for proper scoring rules.
 - ``LogisticModel``: L2-regularised logistic regression on standardised
   features. Linear in the logit; maximally interpretable.
+- ``MicrostructureResidualModel``: treats the market logit as the prior and
+  learns a calibrated residual correction from liquidity, spread, price-shape,
+  and event-structure features. This is the cleanest market-microstructure
+  thesis in the zoo: trade only when public book signals say the prior is
+  systematically biased.
+- ``MicrostructureGBMModel``: the same market-prior-plus-residual thesis, but
+  with a nonlinear tabular learner for book-state interactions.
 - ``KNNModel``: k-NN on standardised features with distance weighting.
   Nonparametric, catches local non-linearities the logistic model can't.
 - ``GradientBoostingModel``: scikit-learn HistGradientBoostingClassifier
@@ -61,6 +68,15 @@ class Model(Protocol):
 
 def _clip(p: np.ndarray) -> np.ndarray:
     return np.clip(p, 1e-6, 1 - 1e-6)
+
+
+def _logit(p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    p = np.clip(p, eps, 1 - eps)
+    return np.log(p / (1 - p))
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +148,173 @@ class LogisticModel:
         assert self._scaler is not None and self._clf is not None
         Xs = self._scaler.transform(fm.X)
         return _clip(self._clf.predict_proba(Xs)[:, 1])
+
+
+@dataclass
+class MicrostructureResidualModel:
+    """Market-prior plus a calibrated microstructure residual.
+
+    The model intentionally avoids using raw ``market_logit`` as a free
+    feature. Instead it fits a logistic model on book-quality and market-shape
+    variables, then blends that prediction with the market prior on the logit
+    scale:
+
+        logit(p) = (1 - alpha) * logit(market) + alpha * logit(micro_model)
+
+    ``alpha`` is selected on the late part of the training window, so if the
+    microstructure correction does not help out-of-sample the model collapses
+    back toward the market prior.
+    """
+
+    name: str = "micro_residual"
+    C: float = 0.5
+    cal_frac: float = 0.25
+    alpha_grid: tuple[float, ...] = (0.0, 0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0)
+    _feature_idx: np.ndarray | None = None
+    _scaler: StandardScaler | None = None
+    _clf: LogisticRegression | None = None
+    _alpha: float = 0.35
+
+    _MICRO_FEATURES = frozenset(
+        {
+            "market_spread",
+            "log_spread",
+            "ttr_norm",
+            "price_extremity",
+            "price_uncertainty",
+            "category_base_rate",
+            "feat_signal",
+            "feat_momentum",
+            "feat_dispersion",
+            "feat_liquidity",
+            "feat_trade_activity",
+            "feat_open_interest",
+            "feat_volume_share",
+            "feat_event_market_count",
+            "spread_x_extremity",
+            "liquidity_x_spread",
+        }
+    )
+
+    @staticmethod
+    def _log_loss(p: np.ndarray, y: np.ndarray) -> float:
+        p = np.clip(p, 1e-9, 1 - 1e-9)
+        return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+    def _select_features(self, fm: FeatureMatrix) -> np.ndarray:
+        idx = [
+            i
+            for i, name in enumerate(fm.feature_names)
+            if name in self._MICRO_FEATURES or name.startswith("cat_")
+        ]
+        if not idx:
+            idx = list(range(fm.X.shape[1]))
+        return np.array(idx, dtype=int)
+
+    def _fit_classifier(self, X: np.ndarray, y: np.ndarray) -> None:
+        self._scaler = StandardScaler().fit(X)
+        Xs = self._scaler.transform(X)
+        self._clf = LogisticRegression(
+            C=self.C, solver="lbfgs", max_iter=500, random_state=0
+        ).fit(Xs, y)
+
+    def _predict_micro(self, X: np.ndarray) -> np.ndarray:
+        assert self._scaler is not None and self._clf is not None
+        return _clip(self._clf.predict_proba(self._scaler.transform(X))[:, 1])
+
+    def fit(self, fm: FeatureMatrix) -> "MicrostructureResidualModel":
+        self._feature_idx = self._select_features(fm)
+        X = fm.X[:, self._feature_idx]
+        n = len(fm.y)
+        cut = max(int(n * (1 - self.cal_frac)), 2)
+
+        if cut < n and len(np.unique(fm.y[:cut])) == 2 and len(np.unique(fm.y[cut:])) == 2:
+            self._fit_classifier(X[:cut], fm.y[:cut])
+            p_micro = self._predict_micro(X[cut:])
+            l_market = _logit(fm.market_prob[cut:])
+            l_micro = _logit(p_micro)
+            losses = [
+                (alpha, self._log_loss(_sigmoid((1 - alpha) * l_market + alpha * l_micro), fm.y[cut:]))
+                for alpha in self.alpha_grid
+            ]
+            self._alpha = min(losses, key=lambda item: item[1])[0]
+
+        self._fit_classifier(X, fm.y)
+        return self
+
+    def predict(self, fm: FeatureMatrix) -> np.ndarray:
+        assert self._feature_idx is not None
+        p_micro = self._predict_micro(fm.X[:, self._feature_idx])
+        blended = (1 - self._alpha) * _logit(fm.market_prob) + self._alpha * _logit(p_micro)
+        return _clip(_sigmoid(blended))
+
+
+@dataclass
+class MicrostructureGBMModel:
+    """Nonlinear microstructure residual blended with the market prior."""
+
+    name: str = "micro_gbm"
+    max_iter: int = 200
+    learning_rate: float = 0.04
+    max_leaf_nodes: int = 15
+    cal_frac: float = 0.25
+    alpha_grid: tuple[float, ...] = (0.0, 0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 1.0)
+    _feature_idx: np.ndarray | None = None
+    _clf: HistGradientBoostingClassifier | None = None
+    _alpha: float = 0.35
+
+    @staticmethod
+    def _log_loss(p: np.ndarray, y: np.ndarray) -> float:
+        p = np.clip(p, 1e-9, 1 - 1e-9)
+        return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+    def _select_features(self, fm: FeatureMatrix) -> np.ndarray:
+        idx = [
+            i
+            for i, name in enumerate(fm.feature_names)
+            if name in MicrostructureResidualModel._MICRO_FEATURES or name.startswith("cat_")
+        ]
+        if not idx:
+            idx = list(range(fm.X.shape[1]))
+        return np.array(idx, dtype=int)
+
+    def _fit_classifier(self, X: np.ndarray, y: np.ndarray) -> None:
+        self._clf = HistGradientBoostingClassifier(
+            max_iter=self.max_iter,
+            learning_rate=self.learning_rate,
+            max_leaf_nodes=self.max_leaf_nodes,
+            random_state=0,
+        ).fit(X, y)
+
+    def _predict_micro(self, X: np.ndarray) -> np.ndarray:
+        assert self._clf is not None
+        return _clip(self._clf.predict_proba(X)[:, 1])
+
+    def fit(self, fm: FeatureMatrix) -> "MicrostructureGBMModel":
+        self._feature_idx = self._select_features(fm)
+        X = fm.X[:, self._feature_idx]
+        n = len(fm.y)
+        cut = max(int(n * (1 - self.cal_frac)), 2)
+
+        if cut < n and len(np.unique(fm.y[:cut])) == 2 and len(np.unique(fm.y[cut:])) == 2:
+            self._fit_classifier(X[:cut], fm.y[:cut])
+            p_micro = self._predict_micro(X[cut:])
+            l_market = _logit(fm.market_prob[cut:])
+            l_micro = _logit(p_micro)
+            losses = [
+                (alpha, self._log_loss(_sigmoid((1 - alpha) * l_market + alpha * l_micro), fm.y[cut:]))
+                for alpha in self.alpha_grid
+            ]
+            self._alpha = min(losses, key=lambda item: item[1])[0]
+
+        self._fit_classifier(X, fm.y)
+        return self
+
+    def predict(self, fm: FeatureMatrix) -> np.ndarray:
+        assert self._feature_idx is not None
+        p_micro = self._predict_micro(fm.X[:, self._feature_idx])
+        blended = (1 - self._alpha) * _logit(fm.market_prob) + self._alpha * _logit(p_micro)
+        return _clip(_sigmoid(blended))
 
 
 @dataclass
@@ -374,22 +557,36 @@ class StackedEnsemble:
 def train_model_zoo(fm: FeatureMatrix) -> list[Model]:
     """Return a list of fitted models. Order is stable for reporting."""
 
-    base_logistic = LogisticModel()
-    base_knn = KNNModel()
-    base_gbm = GradientBoostingModel()
-
     market = MarketPriorModel()
     base_rate = BaseRateModel().fit(fm)
     logistic = LogisticModel().fit(fm)
+    micro_residual = MicrostructureResidualModel().fit(fm)
+    micro_gbm = MicrostructureGBMModel().fit(fm)
     knn = KNNModel().fit(fm)
     gbm = GradientBoostingModel().fit(fm)
     iso_logistic = IsotonicCalibratedModel(base=LogisticModel()).fit(fm)
     shrink_gbm = BayesianShrinkageModel(base=GradientBoostingModel()).fit(fm)
     stack = StackedEnsemble(
-        members=[LogisticModel(), KNNModel(), GradientBoostingModel(), MarketPriorModel()]
+        members=[
+            LogisticModel(),
+            KNNModel(),
+            GradientBoostingModel(),
+            MarketPriorModel(),
+        ]
     ).fit(fm)
 
     # market doesn't need fitting
     market.fit(fm)
 
-    return [market, base_rate, logistic, knn, gbm, iso_logistic, shrink_gbm, stack]
+    return [
+        market,
+        base_rate,
+        logistic,
+        micro_residual,
+        micro_gbm,
+        knn,
+        gbm,
+        iso_logistic,
+        shrink_gbm,
+        stack,
+    ]

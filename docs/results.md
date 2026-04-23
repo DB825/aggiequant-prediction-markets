@@ -69,6 +69,39 @@ noisier datasets; at 1500 events it is fine but not magic.
    category, price bucket, or spread regime usually means a single bias,
    not a general-purpose alpha.
 
+## Multi-year Kalshi macro case study
+
+For a defensible real-data study, avoid terminal settlement snapshots. Run:
+
+```powershell
+aggie-pm case-study --series KXCPI,KXFED --out reports/kalshi_macro_case_study --out-data reports/kalshi_macro_snapshots.csv
+```
+
+This builds point-in-time snapshots from historical candlesticks at fixed
+30/14/7/3/1-day horizons and uses the settled market row only as the label.
+The backtester sorts by `label_available_ts`, so labels only enter training
+after settlement. The generated `case_study.md` is the artifact to cite or
+summarize; it includes the forecast leaderboard, trading-rule sweep, and
+sample-size caveats.
+
+### Relative-value ladder study
+
+Run the no-arbitrage layer on the generated snapshots:
+
+```powershell
+aggie-pm ladder-study --csv reports/kalshi_macro_snapshots.csv --out reports/kalshi_ladder_study
+```
+
+The ladder study parses thresholds, applies isotonic regression to repair each
+event/horizon probability curve, then checks the dominance package
+`YES(lower threshold) + NO(higher threshold)`. On the current KXCPI/KXFED
+sample it scanned 453 ladder panels and 18,225 nested pairs. It found 162
+adjacent monotonicity violations, but no after-fee executable dominance trades.
+That is a useful result: pure internal no-arbitrage is mostly competed away in
+these macro ladders, so the next alpha layer should compare the repaired curve
+to an external fair-value distribution rather than relying on exchange-internal
+crosses alone.
+
 ## Pareto read
 
 After a run, pass `leaderboard.csv` through `aggie_pm.pareto.pareto_front`
